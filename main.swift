@@ -109,9 +109,6 @@ final class UsageStore: ObservableObject {
 
     var onStatusUpdate: ((String) -> Void)?
 
-    /// True when the displayed billing came from a stale cache (last fetch was rate-limited/failed).
-    @Published var billingIsStale = false
-
     private static let cacheURL: URL = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("CostBar", isDirectory: true)
@@ -120,11 +117,11 @@ final class UsageStore: ObservableObject {
     }()
 
     init() {
-        // Seed from disk so the real number shows instantly on launch, even before the first fetch.
+        // Seed billing from disk so the real number shows instantly on launch and
+        // survives a rate-limited fetch (the endpoint rate-limits intermittently).
         if let data = try? Data(contentsOf: Self.cacheURL),
            let cached = try? JSONDecoder().decode(OAuthUsage.self, from: data) {
             oauthUsage = cached
-            billingIsStale = true
         }
     }
 
@@ -149,16 +146,13 @@ final class UsageStore: ObservableObject {
             let oauth = Self.runOAuthUsage()
             DispatchQueue.main.async {
                 self.isLoading = false
+                // Only replace billing on a valid fetch; otherwise keep the last-good
+                // value (a rate-limited/failed fetch returns nil — don't blank the real number).
                 if let oauth, oauth.extra_usage?.is_enabled == true {
-                    // Fresh, valid billing — show it and cache it.
                     self.oauthUsage = oauth
-                    self.billingIsStale = false
                     if let data = try? JSONEncoder().encode(oauth) {
                         try? data.write(to: Self.cacheURL)
                     }
-                } else if self.oauthUsage != nil {
-                    // Fetch failed (rate limit etc.) but we have a prior value — keep it, mark stale.
-                    self.billingIsStale = true
                 }
                 switch result {
                 case .success(let resp):
@@ -174,31 +168,14 @@ final class UsageStore: ObservableObject {
 
     private func updateStatus() {
         let title: String
-        if let billed = realMTDBilling {
-            title = money(billed, decimals: billed >= 100 ? 0 : 2)
+        if let eu = oauthUsage?.extra_usage, eu.is_enabled {
+            let d = eu.usedDollars
+            title = money(d, decimals: d >= 100 ? 0 : 2)
         } else {
             let cur = months.first { $0.id == currentMonthKey }?.total ?? 0
-            title = "~" + money(cur, decimals: 0)
+            title = money(cur, decimals: 0)
         }
         onStatusUpdate?(title)
-    }
-
-    /// True extra-usage dollars billed this month, from the OAuth endpoint. Nil if unavailable.
-    var realMTDBilling: Double? {
-        guard let eu = oauthUsage?.extra_usage, eu.is_enabled else { return nil }
-        return eu.usedDollars
-    }
-
-    /// Whether the displayed numbers are scaled to real billing (true) or raw API-equivalent (false).
-    var isScaled: Bool { realMTDBilling != nil }
-
-    /// Factor that rescales API-equivalent costs so the current month sums to the real bill.
-    /// Applied to every day/model everywhere so all views stay on one consistent number system.
-    var scaleFactor: Double {
-        guard let billed = realMTDBilling else { return 1 }
-        let apiMTD = months.first { $0.id == currentMonthKey }?.total ?? 0
-        guard apiMTD > 0 else { return 1 }
-        return billed / apiMTD
     }
 
     private func apply(_ resp: CCDailyResponse) {
@@ -345,67 +322,55 @@ struct GlassCard<Content: View>: View {
     }
 }
 
-// MARK: - View mode
-
-enum ViewMode: String, CaseIterable, Identifiable {
-    case today = "Today"
-    case week = "Last 7"
-    case month = "This Month"
-    var id: String { rawValue }
-}
-
 // MARK: - Views
 
 struct UsageView: View {
     @ObservedObject var store: UsageStore
-    @State private var mode: ViewMode = .today
     @State private var selectedDate: Date?
 
-    // All days across all months, ascending, scaled to real billing.
-    private var allDays: [DayUsage] {
-        let f = store.scaleFactor
-        return store.months.flatMap(\.days)
-            .sorted { $0.id < $1.id }
-            .map { scaledDay($0, by: f) }
-    }
+    private var days: [DayUsage] { store.selected?.days ?? [] }
+    private var apiMonthTotal: Double { store.selected?.total ?? 0 }
+    private var isCurrentMonth: Bool { store.selected?.id == store.currentMonthKey }
 
-    private func scaledDay(_ d: DayUsage, by f: Double) -> DayUsage {
-        guard f != 1 else { return d }
-        return DayUsage(id: d.id, cost: d.cost * f,
-                        models: d.models.map { ModelAgg(id: $0.id, name: $0.name, cost: $0.cost * f, tokens: $0.tokens) })
+    // Real extra-usage billing for the current month, else the API-equivalent (past months
+    // have no billing data). This is the number shown prominently — no estimate on screen.
+    private var monthTotal: Double {
+        if isCurrentMonth, let eu = store.oauthUsage?.extra_usage, eu.is_enabled {
+            return eu.usedDollars
+        }
+        return apiMonthTotal
     }
-
-    // Days visible in the current mode.
-    private var visibleDays: [DayUsage] {
-        let cal = Calendar.current
-        switch mode {
-        case .today:
-            return allDays.filter { cal.isDateInToday($0.date) }
-        case .week:
-            guard let cutoff = cal.date(byAdding: .day, value: -6, to: cal.startOfDay(for: Date())) else { return [] }
-            return allDays.filter { $0.date >= cutoff }
-        case .month:
-            let key = store.selected?.id ?? store.currentMonthKey
-            return allDays.filter { $0.id.hasPrefix(key) }
+    private var showingRealBilling: Bool {
+        isCurrentMonth && (store.oauthUsage?.extra_usage?.is_enabled == true)
+    }
+    // Factor that rescales this month's API-equivalent figures to the real bill (1 otherwise).
+    private var scale: Double {
+        (showingRealBilling && apiMonthTotal > 0) ? monthTotal / apiMonthTotal : 1
+    }
+    private func scaledDays(_ ds: [DayUsage]) -> [DayUsage] {
+        guard scale != 1 else { return ds }
+        return ds.map { d in
+            DayUsage(id: d.id, cost: d.cost * scale,
+                     models: d.models.map { ModelAgg(id: $0.id, name: $0.name, cost: $0.cost * scale, tokens: $0.tokens) })
         }
     }
 
-    private var visibleTotal: Double { visibleDays.reduce(0) { $0 + $1.cost } }
+    private var chartDays: [DayUsage] { scaledDays(days) }
 
     private var selectedDay: DayUsage? {
         guard let sel = selectedDate else { return nil }
-        return visibleDays.first { Calendar.current.isDate($0.date, inSameDayAs: sel) }
+        return chartDays.first { Calendar.current.isDate($0.date, inSameDayAs: sel) }
     }
 
     private var modelOrder: [String] {
         var totals: [String: Double] = [:]
-        for d in allDays { for m in d.models { totals[m.name, default: 0] += m.cost } }
+        for d in days { for m in d.models { totals[m.name, default: 0] += m.cost } }
         return totals.sorted { $0.value > $1.value }.map(\.key)
     }
 
-    private func aggModels(_ days: [DayUsage]) -> [ModelAgg] {
+    private var monthModels: [ModelAgg] {
         var agg: [String: ModelAgg] = [:]
-        for d in days {
+        for d in chartDays {
             for m in d.models {
                 var a = agg[m.name] ?? ModelAgg(id: m.name, name: m.name, cost: 0, tokens: 0)
                 a.cost += m.cost
@@ -419,7 +384,7 @@ struct UsageView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             billingCard
-            modeSwitcher
+            header
             if let err = store.errorText {
                 GlassCard {
                     Text(err)
@@ -428,41 +393,38 @@ struct UsageView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(12)
                 }
-            } else if visibleDays.isEmpty {
+            } else if days.isEmpty {
                 GlassCard {
-                    Text(store.isLoading ? "Loading…" : "No usage in this range")
+                    Text(store.isLoading ? "Loading…" : "No usage this month")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(28)
+                        .padding(24)
                 }
             } else {
-                if mode != .today {
-                    GlassCard { chart.padding(12) }
-                }
+                GlassCard { chart.padding(12) }
                 GlassCard { breakdown.padding(12) }
             }
             Spacer(minLength: 0)
             footer
         }
         .padding(14)
-        .frame(width: 360, height: mode == .today ? 470 : 640)
+        .frame(width: 360, height: 640)
         .background(.ultraThinMaterial)
         .animation(.smooth(duration: 0.25), value: selectedDate)
-        .animation(.smooth(duration: 0.25), value: mode)
         .animation(.smooth(duration: 0.25), value: store.selectedIndex)
     }
 
-    // Hero glass card: real extra usage billed this month + cap progress + live limits.
+    // True billing (current month, from Claude OAuth endpoint)
     @ViewBuilder
     private var billingCard: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("Extra usage this month")
+                    Text("Extra usage billed")
                         .font(.system(size: 11.5, weight: .semibold))
                     Spacer()
-                    Text(store.billingIsStale ? "cached" : "true billing")
+                    Text("true billing")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 7)
@@ -471,12 +433,12 @@ struct UsageView: View {
                         .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
                 }
                 if let eu = store.oauthUsage?.extra_usage, eu.is_enabled {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
                         Text(money(eu.usedDollars))
-                            .font(.system(size: 30, weight: .bold, design: .rounded))
+                            .font(.system(size: 24, weight: .bold, design: .rounded))
                             .contentTransition(.numericText())
                         Text("of \(money(eu.capDollars, decimals: 0)) cap")
-                            .font(.system(size: 11))
+                            .font(.system(size: 10.5))
                             .foregroundStyle(.tertiary)
                     }
                     GeometryReader { geo in
@@ -501,16 +463,8 @@ struct UsageView: View {
                         }
                     }
                 } else {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text("~" + money(store.months.first { $0.id == store.currentMonthKey }?.total ?? 0, decimals: 0))
-                            .font(.system(size: 30, weight: .bold, design: .rounded))
-                            .contentTransition(.numericText())
-                        Text("est.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                    }
-                    Text("Billing endpoint unavailable — showing API-equivalent estimate. Sign in to Claude Code for true billing.")
-                        .font(.system(size: 9.5))
+                    Text("Billing data unavailable — sign in to Claude Code to refresh the token. Showing API-equivalent only.")
+                        .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -518,13 +472,48 @@ struct UsageView: View {
         }
     }
 
-    private var modeSwitcher: some View {
-        Picker("", selection: $mode) {
-            ForEach(ViewMode.allCases) { Text($0.rawValue).tag($0) }
+    // Month nav + big number + pace
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Button { step(-1) } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(store.selectedIndex <= 0)
+                    .opacity(store.selectedIndex <= 0 ? 0.25 : 0.8)
+
+                    Text(store.selected?.label ?? "Claude Usage")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 92)
+
+                    Button { step(1) } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(store.selectedIndex >= store.months.count - 1)
+                    .opacity(store.selectedIndex >= store.months.count - 1 ? 0.25 : 0.8)
+                }
+                Text(money(monthTotal))
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .contentTransition(.numericText())
+                Text(paceLine)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+            Text(showingRealBilling ? "billed" : "API-equivalent")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(.quaternary.opacity(0.5)))
+                .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .onChange(of: mode) { _, _ in selectedDate = nil }
     }
 
     private func step(_ delta: Int) {
@@ -534,96 +523,77 @@ struct UsageView: View {
         selectedDate = nil
     }
 
-    // Stacked bar chart (Last 7 / This Month), hover to scrub.
-    private var chart: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if mode == .month {
-                HStack(spacing: 4) {
-                    Button { step(-1) } label: {
-                        Image(systemName: "chevron.left").font(.system(size: 9, weight: .bold))
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(store.selectedIndex <= 0)
-                    .opacity(store.selectedIndex <= 0 ? 0.25 : 0.8)
-
-                    Text(store.selected?.label ?? "")
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .frame(minWidth: 92)
-
-                    Button { step(1) } label: {
-                        Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(store.selectedIndex >= store.months.count - 1)
-                    .opacity(store.selectedIndex >= store.months.count - 1 ? 0.25 : 0.8)
-                    Spacer()
-                    Text(money(visibleTotal))
-                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .contentTransition(.numericText())
-                }
-            }
-            Chart {
-                ForEach(visibleDays) { day in
-                    ForEach(day.models) { m in
-                        BarMark(
-                            x: .value("Day", day.date, unit: .day),
-                            y: .value("Cost", m.cost)
-                        )
-                        .foregroundStyle(by: .value("Model", m.name))
-                        .cornerRadius(2.5)
-                        .opacity(selectedDate == nil ||
-                                 Calendar.current.isDate(day.date, inSameDayAs: selectedDate ?? .distantPast)
-                                 ? 1.0 : 0.35)
-                    }
-                }
-            }
-            .chartForegroundStyleScale(domain: modelOrder, range: modelOrder.map(modelColor))
-            .chartLegend(.hidden)
-            .chartXSelection(value: $selectedDate)
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .day, count: visibleDays.count > 16 ? 5 : (mode == .week ? 1 : 2))) { _ in
-                    AxisGridLine().foregroundStyle(.white.opacity(0.06))
-                    AxisValueLabel(format: .dateTime.day(), centered: true)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .chartYAxis {
-                AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
-                    AxisGridLine().foregroundStyle(.white.opacity(0.08))
-                    AxisValueLabel {
-                        if let v = value.as(Double.self) {
-                            Text(v >= 1000 ? String(format: "$%.1fk", v / 1000) : String(format: "$%.0f", v))
-                                .font(.system(size: 9))
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                }
-            }
-            .frame(height: 150)
+    private var paceLine: String {
+        guard monthTotal > 0, !days.isEmpty else { return " " }
+        if isCurrentMonth {
+            let cal = Calendar.current
+            let dayOfMonth = cal.component(.day, from: Date())
+            let daysInMonth = cal.range(of: .day, in: .month, for: Date())?.count ?? 30
+            let avg = monthTotal / Double(max(dayOfMonth, 1))
+            let pace = avg * Double(daysInMonth)
+            return "avg \(money(avg, decimals: 0))/day · pacing \(money(pace, decimals: 0))"
+        } else {
+            let avg = monthTotal / Double(days.count)
+            return "avg \(money(avg, decimals: 0))/day · \(days.count) active days"
         }
     }
 
-    // Per-model cost + tokens for the visible range (or hovered day).
+    // Stacked bar chart, hover to scrub
+    private var chart: some View {
+        Chart {
+            ForEach(chartDays) { day in
+                ForEach(day.models) { m in
+                    BarMark(
+                        x: .value("Day", day.date, unit: .day),
+                        y: .value("Cost", m.cost)
+                    )
+                    .foregroundStyle(by: .value("Model", m.name))
+                    .cornerRadius(2.5)
+                    .opacity(selectedDate == nil ||
+                             Calendar.current.isDate(day.date, inSameDayAs: selectedDate ?? .distantPast)
+                             ? 1.0 : 0.35)
+                }
+            }
+        }
+        .chartForegroundStyleScale(domain: modelOrder, range: modelOrder.map(modelColor))
+        .chartLegend(.hidden)
+        .chartXSelection(value: $selectedDate)
+        .chartXAxis {
+            AxisMarks(values: .stride(by: .day, count: days.count > 16 ? 5 : 2)) { _ in
+                AxisGridLine().foregroundStyle(.white.opacity(0.06))
+                AxisValueLabel(format: .dateTime.day(), centered: true)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .chartYAxis {
+            AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
+                AxisGridLine().foregroundStyle(.white.opacity(0.08))
+                AxisValueLabel {
+                    if let v = value.as(Double.self) {
+                        Text(v >= 1000 ? String(format: "$%.1fk", v / 1000) : String(format: "$%.0f", v))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
+        .frame(height: 150)
+    }
+
+    // Detail: hovered day, or month totals by model
     private var breakdown: some View {
-        let models = aggModels(selectedDay.map { [$0] } ?? visibleDays)
-        let title = selectedDay?.displayDate ?? breakdownTitle
-        let total = selectedDay?.cost ?? visibleTotal
-        return VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text(title)
+                Text(selectedDay?.displayDate ?? "By model")
                     .font(.system(size: 11.5, weight: .semibold))
                 Spacer()
-                Text(money(total))
+                Text(money(selectedDay?.cost ?? monthTotal))
                     .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText())
             }
-            if models.isEmpty {
-                Text("No usage").font(.system(size: 10.5)).foregroundStyle(.tertiary)
-            }
-            ForEach(models) { m in
+            ForEach(selectedDay?.models ?? monthModels) { m in
                 HStack(spacing: 7) {
                     Circle()
                         .fill(modelColor(m.name))
@@ -642,24 +612,12 @@ struct UsageView: View {
                         .contentTransition(.numericText())
                 }
             }
-            HStack(spacing: 4) {
-                Image(systemName: store.isScaled ? "checkmark.seal.fill" : "info.circle")
-                    .font(.system(size: 8))
-                Text(store.isScaled
-                     ? "Scaled to your actual billing"
-                     : "API-equivalent estimate")
+            if selectedDay == nil {
+                Text("Hover the chart for a single day")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.quaternary)
+                    .padding(.top, 2)
             }
-            .font(.system(size: 9))
-            .foregroundStyle(.quaternary)
-            .padding(.top, 2)
-        }
-    }
-
-    private var breakdownTitle: String {
-        switch mode {
-        case .today: return "Today by model"
-        case .week:  return "Last 7 days by model"
-        case .month: return "By model"
         }
     }
 
@@ -722,11 +680,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(sender)
         } else {
-            // Only refresh if data is missing or older than 2 min — avoids hammering the
-            // rate-limited billing endpoint every time the popover opens.
-            if let t = store.lastUpdated, Date().timeIntervalSince(t) < 120 {
-                // recent enough; just show
-            } else {
+            // Refresh only if data is stale (>2 min). The billing endpoint rate-limits,
+            // so don't re-fetch on every open — the 10-min timer + cache cover it.
+            if store.lastUpdated == nil || Date().timeIntervalSince(store.lastUpdated!) > 120 {
                 store.refresh()
             }
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
