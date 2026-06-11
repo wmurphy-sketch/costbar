@@ -22,8 +22,12 @@ If true billing is unavailable (not logged in to Claude Code), the menu bar fall
 Requirements: macOS 14+, [Claude Code](https://claude.com/claude-code) installed and logged in, node/npm (`brew install node`), Xcode Command Line Tools (`xcode-select --install`).
 
 ```bash
+git clone https://github.com/wmurphy-sketch/costbar.git
+cd costbar
 bash install.sh
 ```
+
+To update later: `git pull && bash build.sh`
 
 That checks dependencies, installs `ccusage` if needed, compiles the app locally (~5 seconds), installs to `/Applications/CostBar.app`, and launches it. Because it's built on your machine, there are no Gatekeeper warnings.
 
