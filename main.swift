@@ -107,6 +107,11 @@ final class UsageStore: ObservableObject {
     @Published var errorText: String?
     @Published var isLoading = false
 
+    /// True once we've ever loaded real billing (from disk cache or a live fetch).
+    @Published var billingEverLoaded = false
+    /// True when the displayed billing is from cache because the latest live fetch failed.
+    @Published var billingStale = false
+
     var onStatusUpdate: ((String) -> Void)?
 
     private static let cacheURL: URL = {
@@ -120,8 +125,11 @@ final class UsageStore: ObservableObject {
         // Seed billing from disk so the real number shows instantly on launch and
         // survives a rate-limited fetch (the endpoint rate-limits intermittently).
         if let data = try? Data(contentsOf: Self.cacheURL),
-           let cached = try? JSONDecoder().decode(OAuthUsage.self, from: data) {
+           let cached = try? JSONDecoder().decode(OAuthUsage.self, from: data),
+           cached.extra_usage?.is_enabled == true {
             oauthUsage = cached
+            billingEverLoaded = true
+            billingStale = true   // until a live fetch confirms it
         }
     }
 
@@ -150,9 +158,13 @@ final class UsageStore: ObservableObject {
                 // value (a rate-limited/failed fetch returns nil — don't blank the real number).
                 if let oauth, oauth.extra_usage?.is_enabled == true {
                     self.oauthUsage = oauth
+                    self.billingEverLoaded = true
+                    self.billingStale = false
                     if let data = try? JSONEncoder().encode(oauth) {
                         try? data.write(to: Self.cacheURL)
                     }
+                } else if self.oauthUsage != nil {
+                    self.billingStale = true   // fetch failed, showing cached value
                 }
                 switch result {
                 case .success(let resp):
@@ -167,13 +179,13 @@ final class UsageStore: ObservableObject {
     }
 
     private func updateStatus() {
+        // Only ever show real billing. Never the API-equivalent estimate.
         let title: String
         if let eu = oauthUsage?.extra_usage, eu.is_enabled {
             let d = eu.usedDollars
             title = money(d, decimals: d >= 100 ? 0 : 2)
         } else {
-            let cur = months.first { $0.id == currentMonthKey }?.total ?? 0
-            title = money(cur, decimals: 0)
+            title = "$…"
         }
         onStatusUpdate?(title)
     }
@@ -221,9 +233,21 @@ final class UsageStore: ObservableObject {
     }
 
     private static func runOAuthUsage() -> OAuthUsage? {
+        // Retry on 429/transient errors with backoff — the usage endpoint enforces a
+        // short rolling rate limit, so a single attempt often loses the race.
         let cmd = #"""
         TOKEN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("claudeAiOauth",{}).get("accessToken",""))' 2>/dev/null)
-        [ -n "$TOKEN" ] && curl -sf --max-time 15 "https://api.anthropic.com/api/oauth/usage" -H "Authorization: Bearer $TOKEN" -H "anthropic-beta: oauth-2025-04-20"
+        [ -z "$TOKEN" ] && exit 1
+        for attempt in 1 2 3 4 5; do
+          body=$(curl -s -w "\n%{http_code}" --max-time 15 "https://api.anthropic.com/api/oauth/usage" -H "Authorization: Bearer $TOKEN" -H "anthropic-beta: oauth-2025-04-20")
+          code=$(printf '%s' "$body" | tail -n1)
+          if [ "$code" = "200" ]; then
+            printf '%s' "$body" | sed '$d'
+            exit 0
+          fi
+          sleep $attempt
+        done
+        exit 1
         """#
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -342,6 +366,14 @@ struct UsageView: View {
     }
     private var showingRealBilling: Bool {
         isCurrentMonth && (store.oauthUsage?.extra_usage?.is_enabled == true)
+    }
+    // Headline: real billing (current month) or the month's API-equiv (past months).
+    // Current month with no billing yet → "loading", never the estimate.
+    private var headlineText: String {
+        if isCurrentMonth && !showingRealBilling {
+            return store.billingEverLoaded ? money(monthTotal) : "Billing…"
+        }
+        return money(monthTotal)
     }
     // Factor that rescales this month's API-equivalent figures to the real bill (1 otherwise).
     private var scale: Double {
@@ -498,7 +530,7 @@ struct UsageView: View {
                     .disabled(store.selectedIndex >= store.months.count - 1)
                     .opacity(store.selectedIndex >= store.months.count - 1 ? 0.25 : 0.8)
                 }
-                Text(money(monthTotal))
+                Text(headlineText)
                     .font(.system(size: 22, weight: .bold, design: .rounded))
                     .contentTransition(.numericText())
                 Text(paceLine)
@@ -506,7 +538,7 @@ struct UsageView: View {
                     .foregroundStyle(.tertiary)
             }
             Spacer()
-            Text(showingRealBilling ? "billed" : "API-equivalent")
+            Text(pillText)
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
                 .padding(.horizontal, 7)
@@ -514,6 +546,13 @@ struct UsageView: View {
                 .background(Capsule().fill(.quaternary.opacity(0.5)))
                 .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
         }
+    }
+
+    private var pillText: String {
+        if isCurrentMonth {
+            return store.billingStale ? "cached" : "billed"
+        }
+        return "API-equivalent"
     }
 
     private func step(_ delta: Int) {
