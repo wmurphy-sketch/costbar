@@ -114,6 +114,8 @@ final class UsageStore: ObservableObject {
     /// True when a fetch succeeded but extra-usage is not enabled on this account
     /// (e.g. a Pro-plan teammate). In that case we show the API-equivalent estimate.
     @Published var extraUsageUnavailable = false
+    /// When billing was last successfully fetched (live), for the footer freshness line.
+    @Published var billingUpdatedAt: Date?
 
     var onStatusUpdate: ((String) -> Void)?
 
@@ -164,6 +166,7 @@ final class UsageStore: ObservableObject {
                     self.billingEverLoaded = true
                     self.billingStale = false
                     self.extraUsageUnavailable = false
+                    self.billingUpdatedAt = Date()
                     if let data = try? JSONEncoder().encode(oauth) {
                         try? data.write(to: Self.cacheURL)
                     }
@@ -492,9 +495,7 @@ struct UsageView: View {
                 .opacity(store.selectedIndex >= store.months.count - 1 ? 0.2 : 0.6)
                 Spacer()
                 if isCurrentMonth && store.extraUsageUnavailable {
-                    chip("estimate")
-                } else if isCurrentMonth && store.billingStale {
-                    chip("cached")
+                    chip("estimate")   // distinct meaning: not a real bill at all
                 }
             }
 
@@ -705,19 +706,19 @@ struct UsageView: View {
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 6) {
             if store.isLoading {
                 ProgressView().controlSize(.small)
-            } else if let t = store.lastUpdated {
-                Text("Updated \(t.formatted(date: .omitted, time: .shortened))")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
             }
+            Text(footerStatus)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
             Spacer()
             Button { store.refresh() } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.borderless)
+            .disabled(store.isLoading)
             .help("Refresh")
             Button { NSApp.terminate(nil) } label: {
                 Image(systemName: "power")
@@ -725,6 +726,17 @@ struct UsageView: View {
             .buttonStyle(.borderless)
             .help("Quit")
         }
+    }
+
+    // Quiet freshness line. Shows last successful billing time, with a subtle
+    // "· cached" when the latest live fetch failed (e.g. rate limited) and "· retrying"
+    // while a refresh is in flight.
+    private var footerStatus: String {
+        let t = store.billingUpdatedAt ?? store.lastUpdated
+        let stamp = t.map { "Updated \($0.formatted(date: .omitted, time: .shortened))" } ?? "Loading…"
+        if store.isLoading { return stamp + " · retrying" }
+        if store.billingStale { return stamp + " · cached" }
+        return stamp
     }
 }
 
