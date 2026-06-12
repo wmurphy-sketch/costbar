@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.willmurphy.costbar</string>
+    <string>com.costbar.app</string>
     <key>CFBundleName</key>
     <string>CostBar</string>
     <key>CFBundleDisplayName</key>
