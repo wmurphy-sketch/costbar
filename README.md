@@ -38,19 +38,28 @@ The breakdown also shows `▪ Used today (est.)` — the ccusage activity estima
 
 ## Install
 
-Requirements: macOS 14+, [Claude Code](https://claude.com/claude-code) installed and logged in, node/npm (`brew install node`), Xcode Command Line Tools (`xcode-select --install`).
+Requires macOS 14+ and [Claude Code](https://claude.com/claude-code) installed and logged in. (node/npm optional — only for the usage-estimate chart.)
+
+### Recommended — one line, no Xcode
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wmurphy-sketch/costbar/main/download-install.sh | bash
+```
+
+Downloads the prebuilt universal app (arm64 + x86_64) from the latest [release](https://github.com/wmurphy-sketch/costbar/releases), de-quarantines it, drops it in `/Applications`, and launches it. No compiling, no Xcode, no Swift-version requirement.
+
+First time it reads your Claude Code credential, macOS shows a Keychain prompt — click **Always Allow**.
+
+### Alternative — build from source
+
+Needs Xcode Command Line Tools (`xcode-select --install`) with a Swift toolchain matching your SDK. On macOS beta releases this can require the full Xcode — if so, use the prebuilt installer above instead.
 
 ```bash
 git clone https://github.com/wmurphy-sketch/costbar.git
-cd costbar
-bash install.sh
+cd costbar && bash install.sh
 ```
 
-To update later: `git pull && bash build.sh`
-
-That checks dependencies, installs `ccusage` if needed, compiles the app locally (~5 seconds), installs to `/Applications/CostBar.app`, and launches it. Because it's built on your machine, there are no Gatekeeper warnings.
-
-First time it reads your Claude Code credential, macOS shows a Keychain prompt — click **Always Allow**.
+Update later: `git pull && bash build.sh`. (Maintainers: `bash release.sh` builds the universal zip for a new release.)
 
 ## Privacy
 
