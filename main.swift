@@ -588,6 +588,10 @@ struct UsageView: View {
         guard store.months.indices.contains(next) else { return }
         store.selectedIndex = next
         selectedDate = nil
+        // "Today" only makes sense on the current month — default past months to Month,
+        // and restore Today when returning to the current month.
+        let nowCurrent = store.months[next].id == store.currentMonthKey
+        breakdownScope = nowCurrent ? .today : .month
     }
 
     private var paceLine: String {
@@ -653,13 +657,15 @@ struct UsageView: View {
 
     // Per-model breakdown. Defaults to today; toggle to month; hovering the chart
     // overrides to that day.
+    // "Today" only applies on the current month; past months always use month totals.
+    private var effectiveScopeIsToday: Bool { isCurrentMonth && breakdownScope == .today }
     private var breakdownModels: [ModelAgg] {
         if let d = selectedDay { return d.models }
-        return breakdownScope == .today ? todayModels : monthModels
+        return effectiveScopeIsToday ? todayModels : monthModels
     }
     private var breakdownTotal: Double {
         if let d = selectedDay { return d.cost }
-        return breakdownScope == .today ? todayTotal : monthTotal
+        return effectiveScopeIsToday ? todayTotal : monthTotal
     }
 
     private var breakdown: some View {
@@ -668,7 +674,8 @@ struct UsageView: View {
                 if let d = selectedDay {
                     Text(d.displayDate)
                         .font(.system(size: 12, weight: .semibold))
-                } else {
+                } else if isCurrentMonth {
+                    // Today/Month toggle only on the current month
                     Picker("", selection: $breakdownScope) {
                         ForEach(BreakdownScope.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
@@ -676,6 +683,10 @@ struct UsageView: View {
                     .labelsHidden()
                     .fixedSize()
                     .controlSize(.small)
+                } else {
+                    // Past months: no "today" exists — just label the month total
+                    Text("By model")
+                        .font(.system(size: 12, weight: .semibold))
                 }
                 Spacer()
                 Text(money(breakdownTotal))
@@ -689,7 +700,7 @@ struct UsageView: View {
             ScrollView {
                 VStack(spacing: 11) {
                     if breakdownModels.isEmpty {
-                        Text(breakdownScope == .today && selectedDay == nil
+                        Text(effectiveScopeIsToday && selectedDay == nil
                              ? "No usage yet today" : "No usage")
                             .font(.system(size: 10.5))
                             .foregroundStyle(.tertiary)

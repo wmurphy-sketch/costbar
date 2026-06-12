@@ -13,11 +13,24 @@ A tiny native macOS menu bar app that shows what your Claude usage actually cost
 | Number | Source | What it is |
 |---|---|---|
 | True billing (top card + menu bar) | Anthropic's usage endpoint, via your Claude Code login | Real dollars billed this month beyond your seat |
-| API-equivalent (chart + history) | `ccusage` reading your local Claude Code logs | What your usage *would* cost at API list prices — useful for spotting expensive days and models, not a bill |
+| API-equivalent (chart + history) | `ccusage` reading your local Claude Code logs | What your usage *would* cost at API list prices — useful for spotting expensive days and models, **not a bill** (see "How accurate is the per-day breakdown?" below) |
 
 **Works with Claude Code in any IDE** — VS Code, JetBrains, Cursor, or a plain terminal. CostBar reads the credentials and logs the Claude Code CLI writes locally, so it doesn't matter where you run Claude Code. It does *not* see usage from claude.ai in a browser, the Claude desktop app, or raw API calls — only what goes through the Claude Code CLI.
 
 **If your plan doesn't have extra-usage enabled** (e.g. plain Pro), there's no real bill to show — the app gracefully falls back to the API-equivalent estimate, labeled `Est. usage` with an `estimate` chip and a `~` in the menu bar. If you're simply not logged in to Claude Code yet, it shows `Billing…` until you are.
+
+## How accurate is the per-day breakdown?
+
+Be clear-eyed about this. Anthropic exposes exactly **one** authoritative billing figure: your **month-to-date** extra-usage total (the number in the top card and menu bar). That number is always exact — it comes straight from Anthropic's usage endpoint.
+
+It does **not** expose any per-day or per-model history. There is no daily billing archive to read; we checked. So the daily chart and the per-model breakdown are computed from `ccusage`, which prices your local Claude Code logs at **API list rates**. On a normal day that's close, but on a heavy day — lots of Fable usage, or many subagents fanning out — the API-list estimate can run well above your actual subscription-billed cost (your effective rate is below list, and Fable is priced above Opus). **Treat the daily/per-model bars as a relative guide ("which days and models were heavy"), not as your exact bill.**
+
+The accurate way to get a real *daily* number is to difference the month-to-date counter day over day (today's total − yesterday's total = today's real spend). That only works **going forward** from when tracking starts, because the past isn't stored anywhere retrievable.
+
+**Bottom line:**
+- **Month-to-date total** — exact, any time.
+- **Historical per-day / per-model** — estimate only (API-list via ccusage); not your real bill.
+- **Going forward** — a daily snapshot-and-difference of the real counter would be exact, but only from the day you start recording. (Not built yet — the current daily bars are the ccusage estimate.)
 
 ## Install
 
