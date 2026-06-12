@@ -132,12 +132,60 @@ final class UsageStore: ObservableObject {
 
     var onStatusUpdate: ((String) -> Void)?
 
-    private static let cacheURL: URL = {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    private static func dir() -> URL {
+        let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("CostBar", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("billing.json")
-    }()
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+    private static let cacheURL = dir().appendingPathComponent("billing.json")
+    private static let ledgerURL = dir().appendingPathComponent("overage-ledger.json")
+
+    // MARK: Real-overage daily ledger (forward-differencing of used_credits)
+
+    /// Per-day high-water mark of used_credits (dollars), keyed by yyyy-MM-dd (local).
+    /// Today's real overage = today's high-water − the prior day's high-water.
+    @Published private(set) var overageEnd: [String: Double] = [:]   // date → end-of-day used_credits
+
+    /// Real overage billed on a given local day, or nil if we don't yet have both
+    /// that day's and the prior day's snapshots (so we never show a fabricated number).
+    func realOverage(forDayKey key: String) -> Double? {
+        guard let end = overageEnd[key] else { return nil }
+        // Find the most recent prior recorded day.
+        let priorKeys = overageEnd.keys.filter { $0 < key }.sorted()
+        guard let prevKey = priorKeys.last, let prev = overageEnd[prevKey] else {
+            return nil   // first day on record — no baseline to diff against
+        }
+        let delta = end - prev
+        // Negative delta = monthly reset (counter rolled to ~0). On a reset day the
+        // billed amount is just the new end value (spend since the reset).
+        return delta < 0 ? end : delta
+    }
+
+    private func recordOverageSnapshot(_ usedDollars: Double) {
+        let key = Self.localDayKey(Date())
+        // Keep the high-water mark for the day (used_credits only rises within a month).
+        if let existing = overageEnd[key], existing > usedDollars {
+            // lower than what we already saw today → monthly reset mid-day; start fresh
+            overageEnd[key] = usedDollars
+        } else {
+            overageEnd[key] = usedDollars
+        }
+        // Prune to ~90 days to keep the file small.
+        if overageEnd.count > 100 {
+            for k in overageEnd.keys.sorted().prefix(overageEnd.count - 90) { overageEnd[k] = nil }
+        }
+        if let data = try? JSONEncoder().encode(overageEnd) {
+            try? data.write(to: Self.ledgerURL)
+        }
+    }
+
+    static func localDayKey(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = .current
+        return f.string(from: date)
+    }
 
     init() {
         // Seed billing from disk so the real number shows instantly on launch and
@@ -148,6 +196,11 @@ final class UsageStore: ObservableObject {
             oauthUsage = cached
             billingEverLoaded = true
             billingStale = true   // until a live fetch confirms it
+        }
+        // Load the overage ledger.
+        if let data = try? Data(contentsOf: Self.ledgerURL),
+           let led = try? JSONDecoder().decode([String: Double].self, from: data) {
+            overageEnd = led
         }
     }
 
@@ -174,12 +227,13 @@ final class UsageStore: ObservableObject {
                 self.isLoading = false
                 // Only replace billing on a valid fetch; otherwise keep the last-good
                 // value (a rate-limited/failed fetch returns nil — don't blank the real number).
-                if let oauth, oauth.extra_usage?.is_enabled == true {
+                if let oauth, let eu = oauth.extra_usage, eu.is_enabled {
                     self.oauthUsage = oauth
                     self.billingEverLoaded = true
                     self.billingStale = false
                     self.extraUsageUnavailable = false
                     self.billingUpdatedAt = Date()
+                    self.recordOverageSnapshot(eu.usedDollars)   // bank a real daily data point
                     if let data = try? JSONEncoder().encode(oauth) {
                         try? data.write(to: Self.cacheURL)
                     }
@@ -731,6 +785,27 @@ struct UsageView: View {
             }
             .frame(height: 120)
             .scrollIndicators(.never)
+
+            // Real overage billed today — the exact, counter-differenced number.
+            // Distinct from the API-list estimate above. Current month + no day hovered.
+            if isCurrentMonth && selectedDay == nil {
+                Divider().opacity(0.4)
+                HStack(spacing: 5) {
+                    Image(systemName: "checkmark.seal.fill").font(.system(size: 8))
+                    if let real = store.realOverage(forDayKey: UsageStore.localDayKey(Date())) {
+                        Text("Billed today")
+                            .font(.system(size: 10, weight: .medium))
+                        Spacer()
+                        Text(money(real))
+                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                    } else {
+                        Text("Real daily billing tracks from tomorrow")
+                            .font(.system(size: 9.5))
+                        Spacer()
+                    }
+                }
+                .foregroundStyle(.tertiary)
+            }
         }
     }
 
