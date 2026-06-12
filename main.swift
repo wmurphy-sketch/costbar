@@ -117,6 +117,19 @@ final class UsageStore: ObservableObject {
     /// When billing was last successfully fetched (live), for the footer freshness line.
     @Published var billingUpdatedAt: Date?
 
+    /// Manual refresh is allowed at most once per 10 min since the last successful sync,
+    /// to avoid stacking requests against the shared rolling rate limit.
+    static let manualCooldown: TimeInterval = 600
+    var manualRefreshAllowed: Bool {
+        guard let t = billingUpdatedAt else { return true }   // never synced → allow
+        return Date().timeIntervalSince(t) >= Self.manualCooldown
+    }
+    /// Seconds until manual refresh becomes available again (0 if available now).
+    var manualCooldownRemaining: TimeInterval {
+        guard let t = billingUpdatedAt else { return 0 }
+        return max(0, Self.manualCooldown - Date().timeIntervalSince(t))
+    }
+
     var onStatusUpdate: ((String) -> Void)?
 
     private static let cacheURL: URL = {
@@ -370,6 +383,10 @@ struct UsageView: View {
     @ObservedObject var store: UsageStore
     @State private var selectedDate: Date?
     @State private var breakdownScope: BreakdownScope = .today
+    // Ticks every second while the popover is open so the manual-refresh cooldown
+    // re-enables and its countdown updates without needing a state change.
+    @State private var now = Date()
+    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var days: [DayUsage] { store.selected?.days ?? [] }
     private var apiMonthTotal: Double { store.selected?.total ?? 0 }
@@ -467,6 +484,7 @@ struct UsageView: View {
         .padding(16)
         .frame(width: 368)
         .fixedSize(horizontal: false, vertical: true)
+        .onReceive(ticker) { now = $0 }
     }
 
     // Unified hero: title + pill, the single big number, cap heat bar, limits, then chart.
@@ -718,14 +736,28 @@ struct UsageView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.borderless)
-            .disabled(store.isLoading)
-            .help("Refresh")
+            .disabled(store.isLoading || !canManualRefresh)
+            .opacity(store.isLoading || !canManualRefresh ? 0.35 : 1)
+            .help(refreshTooltip)
             Button { NSApp.terminate(nil) } label: {
                 Image(systemName: "power")
             }
             .buttonStyle(.borderless)
             .help("Quit")
         }
+    }
+
+    // Manual-refresh gating, recomputed each tick via `now`.
+    private var canManualRefresh: Bool {
+        _ = now   // depend on the ticker so this re-evaluates over time
+        return store.manualRefreshAllowed
+    }
+    private var refreshTooltip: String {
+        _ = now
+        let remaining = store.manualCooldownRemaining
+        if remaining <= 0 { return "Refresh now" }
+        let m = Int(remaining) / 60, s = Int(remaining) % 60
+        return m > 0 ? "Refresh available in \(m)m \(s)s" : "Refresh available in \(s)s"
     }
 
     // Quiet freshness line. Shows last successful billing time, with a subtle
@@ -767,7 +799,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         store.refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
+        // Background refresh every 30 min. No refresh-on-open — that endpoint shares a
+        // rolling rate limit with the Claude Code CLI, so opening the popover never fetches.
+        timer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { [weak self] _ in
             self?.store.refresh()
         }
     }
@@ -777,11 +811,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(sender)
         } else {
-            // Refresh only if data is stale (>2 min). The billing endpoint rate-limits,
-            // so don't re-fetch on every open — the 10-min timer + cache cover it.
-            if store.lastUpdated == nil || Date().timeIntervalSince(store.lastUpdated!) > 120 {
-                store.refresh()
-            }
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
