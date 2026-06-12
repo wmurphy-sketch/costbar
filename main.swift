@@ -335,24 +335,26 @@ func modelColor(_ name: String) -> Color {
 struct GlassCard<Content: View>: View {
     @ViewBuilder let content: Content
 
+    private let r: CGFloat = 16
+
     var body: some View {
         content
             .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: r, style: .continuous)
                     .fill(.regularMaterial)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        RoundedRectangle(cornerRadius: r, style: .continuous)
                             .fill(LinearGradient(
-                                colors: [.white.opacity(0.10), .white.opacity(0.02)],
+                                colors: [.white.opacity(0.09), .white.opacity(0.015)],
                                 startPoint: .topLeading, endPoint: .bottomTrailing))
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        RoundedRectangle(cornerRadius: r, style: .continuous)
                             .strokeBorder(LinearGradient(
-                                colors: [.white.opacity(0.45), .white.opacity(0.06), .white.opacity(0.18)],
-                                startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
+                                colors: [.white.opacity(0.40), .white.opacity(0.05), .white.opacity(0.14)],
+                                startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.75)
                     )
-                    .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
+                    .shadow(color: .black.opacity(0.22), radius: 12, y: 5)
             )
     }
 }
@@ -444,42 +446,41 @@ struct UsageView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             if let err = store.errorText, store.oauthUsage == nil {
                 GlassCard {
                     Text(err)
                         .font(.caption)
                         .foregroundStyle(.red)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
+                        .padding(16)
                 }
             } else {
-                GlassCard { heroCard.padding(14) }
-                GlassCard { breakdown.padding(12) }
+                GlassCard { heroCard.padding(16) }
+                GlassCard { breakdown.padding(.horizontal, 16).padding(.vertical, 14) }
             }
             footer
         }
-        .padding(14)
-        .frame(width: 360, height: 540)
-        .background(.ultraThinMaterial)
-        .animation(.smooth(duration: 0.2), value: selectedDate)
-        .animation(.smooth(duration: 0.2), value: breakdownScope)
+        .padding(16)
+        .frame(width: 368)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     // Unified hero: title + pill, the single big number, cap heat bar, limits, then chart.
     private var heroCard: some View {
         let eu = store.oauthUsage?.extra_usage
-        return VStack(alignment: .leading, spacing: 10) {
-            // Title row + month nav + pill
+        return VStack(alignment: .leading, spacing: 14) {
+            // Title row + month nav + chip
             HStack(spacing: 6) {
                 Text(showingEstimate ? "Est. usage" : "Extra usage")
                     .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
                 Button { step(-1) } label: {
                     Image(systemName: "chevron.left").font(.system(size: 9, weight: .bold))
                 }
                 .buttonStyle(.borderless)
                 .disabled(store.selectedIndex <= 0)
-                .opacity(store.selectedIndex <= 0 ? 0.25 : 0.7)
+                .opacity(store.selectedIndex <= 0 ? 0.2 : 0.6)
                 Text(store.selected?.label ?? "—")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -488,7 +489,7 @@ struct UsageView: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(store.selectedIndex >= store.months.count - 1)
-                .opacity(store.selectedIndex >= store.months.count - 1 ? 0.25 : 0.7)
+                .opacity(store.selectedIndex >= store.months.count - 1 ? 0.2 : 0.6)
                 Spacer()
                 if isCurrentMonth && store.extraUsageUnavailable {
                     chip("estimate")
@@ -497,57 +498,58 @@ struct UsageView: View {
                 }
             }
 
-            // The number — shown once
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(headlineText)
-                    .font(.system(size: 32, weight: .bold, design: .rounded))
-                    .contentTransition(.numericText())
-                if isCurrentMonth, let eu, eu.is_enabled {
-                    Text("of \(money(eu.capDollars, decimals: 0)) cap")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-
-            // Cap heat bar (current month) or pace (past months)
-            if isCurrentMonth, let eu, eu.is_enabled {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(.quaternary.opacity(0.4))
-                        Capsule()
-                            .fill(LinearGradient(colors: [.teal, .orange, .red],
-                                                 startPoint: .leading, endPoint: .trailing))
-                            .frame(width: max(6, geo.size.width * min(eu.utilization / 100, 1)))
-                            .shadow(color: .orange.opacity(0.4), radius: 4)
-                    }
-                }
-                .frame(height: 6)
-                HStack {
-                    Text("\(Int(eu.utilization))% of cap · \(paceLine)")
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                    if let s = store.oauthUsage?.five_hour, let w = store.oauthUsage?.seven_day {
-                        Text("Session \(Int(s.utilization))% · Week \(Int(w.utilization))%")
-                            .font(.system(size: 9.5))
+            // Number + heat bar + stats — tightly grouped as one unit
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    Text(headlineText)
+                        .font(.system(size: 34, weight: .bold, design: .rounded))
+                        .contentTransition(.numericText())
+                    if isCurrentMonth, let eu, eu.is_enabled {
+                        Text("of \(money(eu.capDollars, decimals: 0)) cap")
+                            .font(.system(size: 11))
                             .foregroundStyle(.tertiary)
                     }
                 }
-            } else {
-                Text(paceLine)
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.tertiary)
+
+                if isCurrentMonth, let eu, eu.is_enabled {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(.quaternary.opacity(0.35))
+                            Capsule()
+                                .fill(LinearGradient(colors: [.teal, .orange, .red],
+                                                     startPoint: .leading, endPoint: .trailing))
+                                .frame(width: max(6, geo.size.width * min(eu.utilization / 100, 1)))
+                                .shadow(color: .orange.opacity(0.35), radius: 4)
+                        }
+                    }
+                    .frame(height: 5)
+                    HStack(spacing: 0) {
+                        Text("\(Int(eu.utilization))% of cap · \(paceLine)")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                        Spacer(minLength: 8)
+                        if let s = store.oauthUsage?.five_hour, let w = store.oauthUsage?.seven_day {
+                            Text("Session \(Int(s.utilization))% · Week \(Int(w.utilization))%")
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                } else {
+                    Text(paceLine)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.tertiary)
+                }
             }
 
-            // Chart, same card
+            // Chart — its own breathing room below the stats group
             if days.isEmpty {
                 Text(store.isLoading ? "Loading…" : "No usage this month")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 28)
+                    .padding(.vertical, 32)
             } else {
-                chart.padding(.top, 2)
+                chart
             }
         }
     }
@@ -614,17 +616,20 @@ struct UsageView: View {
         }
         .chartYAxis {
             AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
-                AxisGridLine().foregroundStyle(.white.opacity(0.08))
+                AxisGridLine().foregroundStyle(.white.opacity(0.07))
                 AxisValueLabel {
                     if let v = value.as(Double.self) {
                         Text(v >= 1000 ? String(format: "$%.1fk", v / 1000) : String(format: "$%.0f", v))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.quaternary)
                     }
                 }
             }
         }
-        .frame(height: 140)
+        .chartPlotStyle { plot in
+            plot.padding(.trailing, 4).padding(.leading, 2)
+        }
+        .frame(height: 132)
     }
 
     // Per-model breakdown. Defaults to today; toggle to month; hovering the chart
@@ -639,11 +644,11 @@ struct UsageView: View {
     }
 
     private var breakdown: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 11) {
             HStack(spacing: 8) {
                 if let d = selectedDay {
                     Text(d.displayDate)
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                 } else {
                     Picker("", selection: $breakdownScope) {
                         ForEach(BreakdownScope.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -651,48 +656,51 @@ struct UsageView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .fixedSize()
+                    .controlSize(.small)
                 }
                 Spacer()
                 Text(money(breakdownTotal))
-                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText())
             }
+            .frame(height: 22)
             // Fixed-height list (5 rows visible, scrolls if more) so the window
             // never resizes on hover/toggle — keeps it smooth.
             ScrollView {
-                VStack(spacing: 9) {
+                VStack(spacing: 11) {
                     if breakdownModels.isEmpty {
                         Text(breakdownScope == .today && selectedDay == nil
                              ? "No usage yet today" : "No usage")
                             .font(.system(size: 10.5))
                             .foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 2)
                     }
                     ForEach(breakdownModels) { m in
-                        HStack(spacing: 7) {
+                        HStack(spacing: 8) {
                             Circle()
                                 .fill(modelColor(m.name))
                                 .frame(width: 7, height: 7)
-                                .shadow(color: modelColor(m.name).opacity(0.7), radius: 3)
+                                .shadow(color: modelColor(m.name).opacity(0.6), radius: 3)
                             Text(m.name)
                                 .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.primary.opacity(0.85))
                             Spacer()
                             Text("\(tokens(m.tokens)) tok")
-                                .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundStyle(.tertiary)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.quaternary)
                             Text(money(m.cost))
-                                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                .frame(width: 70, alignment: .trailing)
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .frame(width: 72, alignment: .trailing)
                                 .contentTransition(.numericText())
                         }
                     }
                 }
                 .frame(maxWidth: .infinity)
             }
-            .frame(height: 116)
-            .scrollIndicators(.automatic)
+            .frame(height: 120)
+            .scrollIndicators(.never)
         }
     }
 
@@ -738,7 +746,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: UsageView(store: store))
+        let host = NSHostingController(rootView: UsageView(store: store))
+        host.sizingOptions = [.preferredContentSize]   // let SwiftUI drive the popover size
+        popover.contentViewController = host
 
         store.onStatusUpdate = { [weak self] title in
             self?.statusItem.button?.title = title
