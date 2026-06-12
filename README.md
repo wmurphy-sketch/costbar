@@ -15,7 +15,9 @@ A tiny native macOS menu bar app that shows what your Claude usage actually cost
 | True billing (top card + menu bar) | Anthropic's usage endpoint, via your Claude Code login | Real dollars billed this month beyond your seat |
 | API-equivalent (chart + history) | `ccusage` reading your local Claude Code logs | What your usage *would* cost at API list prices — useful for spotting expensive days and models, not a bill |
 
-If true billing is unavailable (not logged in to Claude Code), the menu bar falls back to the API-equivalent with a `~` prefix.
+**Works with Claude Code in any IDE** — VS Code, JetBrains, Cursor, or a plain terminal. CostBar reads the credentials and logs the Claude Code CLI writes locally, so it doesn't matter where you run Claude Code. It does *not* see usage from claude.ai in a browser, the Claude desktop app, or raw API calls — only what goes through the Claude Code CLI.
+
+**If your plan doesn't have extra-usage enabled** (e.g. plain Pro), there's no real bill to show — the app gracefully falls back to the API-equivalent estimate, labeled `Est. usage` with an `estimate` chip and a `~` in the menu bar. If you're simply not logged in to Claude Code yet, it shows `Billing…` until you are.
 
 ## Install
 

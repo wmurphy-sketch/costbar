@@ -111,6 +111,9 @@ final class UsageStore: ObservableObject {
     @Published var billingEverLoaded = false
     /// True when the displayed billing is from cache because the latest live fetch failed.
     @Published var billingStale = false
+    /// True when a fetch succeeded but extra-usage is not enabled on this account
+    /// (e.g. a Pro-plan teammate). In that case we show the API-equivalent estimate.
+    @Published var extraUsageUnavailable = false
 
     var onStatusUpdate: ((String) -> Void)?
 
@@ -160,9 +163,13 @@ final class UsageStore: ObservableObject {
                     self.oauthUsage = oauth
                     self.billingEverLoaded = true
                     self.billingStale = false
+                    self.extraUsageUnavailable = false
                     if let data = try? JSONEncoder().encode(oauth) {
                         try? data.write(to: Self.cacheURL)
                     }
+                } else if oauth != nil {
+                    // Fetch succeeded but extra-usage isn't enabled on this account.
+                    self.extraUsageUnavailable = true
                 } else if self.oauthUsage != nil {
                     self.billingStale = true   // fetch failed, showing cached value
                 }
@@ -179,11 +186,15 @@ final class UsageStore: ObservableObject {
     }
 
     private func updateStatus() {
-        // Only ever show real billing. Never the API-equivalent estimate.
+        // Prefer real billing. Fall back to the API-equivalent estimate only when
+        // extra-usage genuinely isn't enabled on this account (e.g. a Pro-plan user).
         let title: String
         if let eu = oauthUsage?.extra_usage, eu.is_enabled {
             let d = eu.usedDollars
             title = money(d, decimals: d >= 100 ? 0 : 2)
+        } else if extraUsageUnavailable {
+            let cur = months.first { $0.id == currentMonthKey }?.total ?? 0
+            title = "~" + money(cur, decimals: 0)   // estimate (no real billing on this account)
         } else {
             title = "$…"
         }
@@ -348,9 +359,12 @@ struct GlassCard<Content: View>: View {
 
 // MARK: - Views
 
+enum BreakdownScope: String, CaseIterable { case today = "Today", month = "Month" }
+
 struct UsageView: View {
     @ObservedObject var store: UsageStore
     @State private var selectedDate: Date?
+    @State private var breakdownScope: BreakdownScope = .today
 
     private var days: [DayUsage] { store.selected?.days ?? [] }
     private var apiMonthTotal: Double { store.selected?.total ?? 0 }
@@ -367,13 +381,21 @@ struct UsageView: View {
     private var showingRealBilling: Bool {
         isCurrentMonth && (store.oauthUsage?.extra_usage?.is_enabled == true)
     }
-    // Headline: real billing (current month) or the month's API-equiv (past months).
-    // Current month with no billing yet → "loading", never the estimate.
+    // Headline:
+    //  • current month, real billing available → real number
+    //  • current month, extra-usage not enabled (e.g. Pro plan) → API-equivalent estimate
+    //  • current month, billing not fetched yet → "Billing…"
+    //  • past months → API-equivalent
     private var headlineText: String {
         if isCurrentMonth && !showingRealBilling {
+            if store.extraUsageUnavailable { return money(monthTotal) }   // estimate
             return store.billingEverLoaded ? money(monthTotal) : "Billing…"
         }
         return money(monthTotal)
+    }
+    // Whether the current view is showing an estimate rather than real billing.
+    private var showingEstimate: Bool {
+        (isCurrentMonth && store.extraUsageUnavailable) || !isCurrentMonth
     }
     // Factor that rescales this month's API-equivalent figures to the real bill (1 otherwise).
     private var scale: Double {
@@ -400,9 +422,9 @@ struct UsageView: View {
         return totals.sorted { $0.value > $1.value }.map(\.key)
     }
 
-    private var monthModels: [ModelAgg] {
+    private func aggModels(_ ds: [DayUsage]) -> [ModelAgg] {
         var agg: [String: ModelAgg] = [:]
-        for d in chartDays {
+        for d in ds {
             for m in d.models {
                 var a = agg[m.name] ?? ModelAgg(id: m.name, name: m.name, cost: 0, tokens: 0)
                 a.cost += m.cost
@@ -411,6 +433,14 @@ struct UsageView: View {
             }
         }
         return agg.values.sorted { $0.cost > $1.cost }
+    }
+
+    private var monthModels: [ModelAgg] { aggModels(chartDays) }
+    private var todayModels: [ModelAgg] {
+        aggModels(chartDays.filter { Calendar.current.isDateInToday($0.date) })
+    }
+    private var todayTotal: Double {
+        chartDays.filter { Calendar.current.isDateInToday($0.date) }.reduce(0) { $0 + $1.cost }
     }
 
     var body: some View {
@@ -427,14 +457,13 @@ struct UsageView: View {
                 GlassCard { heroCard.padding(14) }
                 GlassCard { breakdown.padding(12) }
             }
-            Spacer(minLength: 0)
             footer
         }
         .padding(14)
-        .frame(width: 360, height: 600)
+        .frame(width: 360, height: 540)
         .background(.ultraThinMaterial)
-        .animation(.smooth(duration: 0.25), value: selectedDate)
-        .animation(.smooth(duration: 0.25), value: store.selectedIndex)
+        .animation(.smooth(duration: 0.2), value: selectedDate)
+        .animation(.smooth(duration: 0.2), value: breakdownScope)
     }
 
     // Unified hero: title + pill, the single big number, cap heat bar, limits, then chart.
@@ -443,7 +472,7 @@ struct UsageView: View {
         return VStack(alignment: .leading, spacing: 10) {
             // Title row + month nav + pill
             HStack(spacing: 6) {
-                Text("Extra usage")
+                Text(showingEstimate ? "Est. usage" : "Extra usage")
                     .font(.system(size: 11.5, weight: .semibold))
                 Button { step(-1) } label: {
                     Image(systemName: "chevron.left").font(.system(size: 9, weight: .bold))
@@ -461,13 +490,11 @@ struct UsageView: View {
                 .disabled(store.selectedIndex >= store.months.count - 1)
                 .opacity(store.selectedIndex >= store.months.count - 1 ? 0.25 : 0.7)
                 Spacer()
-                Text(pillText)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(.quaternary.opacity(0.5)))
-                    .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
+                if isCurrentMonth && store.extraUsageUnavailable {
+                    chip("estimate")
+                } else if isCurrentMonth && store.billingStale {
+                    chip("cached")
+                }
             }
 
             // The number — shown once
@@ -525,11 +552,14 @@ struct UsageView: View {
         }
     }
 
-    private var pillText: String {
-        if isCurrentMonth {
-            return store.billingStale ? "cached" : "true billing"
-        }
-        return "API-equivalent"
+    private func chip(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9))
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(.quaternary.opacity(0.5)))
+            .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
     }
 
     private func step(_ delta: Int) {
@@ -597,43 +627,72 @@ struct UsageView: View {
         .frame(height: 140)
     }
 
-    // Per-model breakdown — hovered day, or whole month.
+    // Per-model breakdown. Defaults to today; toggle to month; hovering the chart
+    // overrides to that day.
+    private var breakdownModels: [ModelAgg] {
+        if let d = selectedDay { return d.models }
+        return breakdownScope == .today ? todayModels : monthModels
+    }
+    private var breakdownTotal: Double {
+        if let d = selectedDay { return d.cost }
+        return breakdownScope == .today ? todayTotal : monthTotal
+    }
+
     private var breakdown: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(selectedDay?.displayDate ?? "By model")
-                    .font(.system(size: 11.5, weight: .semibold))
+            HStack(spacing: 8) {
+                if let d = selectedDay {
+                    Text(d.displayDate)
+                        .font(.system(size: 11.5, weight: .semibold))
+                } else {
+                    Picker("", selection: $breakdownScope) {
+                        ForEach(BreakdownScope.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                }
                 Spacer()
-                Text(money(selectedDay?.cost ?? monthTotal))
+                Text(money(breakdownTotal))
                     .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText())
             }
-            ForEach(selectedDay?.models ?? monthModels) { m in
-                HStack(spacing: 7) {
-                    Circle()
-                        .fill(modelColor(m.name))
-                        .frame(width: 7, height: 7)
-                        .shadow(color: modelColor(m.name).opacity(0.7), radius: 3)
-                    Text(m.name)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(tokens(m.tokens)) tok")
-                        .font(.system(size: 10.5, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                    Text(money(m.cost))
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .frame(width: 70, alignment: .trailing)
-                        .contentTransition(.numericText())
+            // Fixed-height list (5 rows visible, scrolls if more) so the window
+            // never resizes on hover/toggle — keeps it smooth.
+            ScrollView {
+                VStack(spacing: 9) {
+                    if breakdownModels.isEmpty {
+                        Text(breakdownScope == .today && selectedDay == nil
+                             ? "No usage yet today" : "No usage")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    ForEach(breakdownModels) { m in
+                        HStack(spacing: 7) {
+                            Circle()
+                                .fill(modelColor(m.name))
+                                .frame(width: 7, height: 7)
+                                .shadow(color: modelColor(m.name).opacity(0.7), radius: 3)
+                            Text(m.name)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(tokens(m.tokens)) tok")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                            Text(money(m.cost))
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .frame(width: 70, alignment: .trailing)
+                                .contentTransition(.numericText())
+                        }
+                    }
                 }
+                .frame(maxWidth: .infinity)
             }
-            if selectedDay == nil {
-                Text("Hover the chart for a single day")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.quaternary)
-                    .padding(.top, 2)
-            }
+            .frame(height: 116)
+            .scrollIndicators(.automatic)
         }
     }
 
