@@ -415,9 +415,7 @@ struct UsageView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            billingCard
-            header
-            if let err = store.errorText {
+            if let err = store.errorText, store.oauthUsage == nil {
                 GlassCard {
                     Text(err)
                         .font(.caption)
@@ -425,132 +423,111 @@ struct UsageView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(12)
                 }
-            } else if days.isEmpty {
-                GlassCard {
-                    Text(store.isLoading ? "Loading…" : "No usage this month")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(24)
-                }
             } else {
-                GlassCard { chart.padding(12) }
+                GlassCard { heroCard.padding(14) }
                 GlassCard { breakdown.padding(12) }
             }
             Spacer(minLength: 0)
             footer
         }
         .padding(14)
-        .frame(width: 360, height: 640)
+        .frame(width: 360, height: 600)
         .background(.ultraThinMaterial)
         .animation(.smooth(duration: 0.25), value: selectedDate)
         .animation(.smooth(duration: 0.25), value: store.selectedIndex)
     }
 
-    // True billing (current month, from Claude OAuth endpoint)
-    @ViewBuilder
-    private var billingCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Extra usage billed")
-                        .font(.system(size: 11.5, weight: .semibold))
-                    Spacer()
-                    Text("true billing")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(.quaternary.opacity(0.5)))
-                        .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
+    // Unified hero: title + pill, the single big number, cap heat bar, limits, then chart.
+    private var heroCard: some View {
+        let eu = store.oauthUsage?.extra_usage
+        return VStack(alignment: .leading, spacing: 10) {
+            // Title row + month nav + pill
+            HStack(spacing: 6) {
+                Text("Extra usage")
+                    .font(.system(size: 11.5, weight: .semibold))
+                Button { step(-1) } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 9, weight: .bold))
                 }
-                if let eu = store.oauthUsage?.extra_usage, eu.is_enabled {
-                    HStack(alignment: .firstTextBaseline, spacing: 5) {
-                        Text(money(eu.usedDollars))
-                            .font(.system(size: 24, weight: .bold, design: .rounded))
-                            .contentTransition(.numericText())
-                        Text("of \(money(eu.capDollars, decimals: 0)) cap")
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.tertiary)
+                .buttonStyle(.borderless)
+                .disabled(store.selectedIndex <= 0)
+                .opacity(store.selectedIndex <= 0 ? 0.25 : 0.7)
+                Text(store.selected?.label ?? "—")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Button { step(1) } label: {
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
+                }
+                .buttonStyle(.borderless)
+                .disabled(store.selectedIndex >= store.months.count - 1)
+                .opacity(store.selectedIndex >= store.months.count - 1 ? 0.25 : 0.7)
+                Spacer()
+                Text(pillText)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(.quaternary.opacity(0.5)))
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
+            }
+
+            // The number — shown once
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(headlineText)
+                    .font(.system(size: 32, weight: .bold, design: .rounded))
+                    .contentTransition(.numericText())
+                if isCurrentMonth, let eu, eu.is_enabled {
+                    Text("of \(money(eu.capDollars, decimals: 0)) cap")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            // Cap heat bar (current month) or pace (past months)
+            if isCurrentMonth, let eu, eu.is_enabled {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.quaternary.opacity(0.4))
+                        Capsule()
+                            .fill(LinearGradient(colors: [.teal, .orange, .red],
+                                                 startPoint: .leading, endPoint: .trailing))
+                            .frame(width: max(6, geo.size.width * min(eu.utilization / 100, 1)))
+                            .shadow(color: .orange.opacity(0.4), radius: 4)
                     }
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(.quaternary.opacity(0.4))
-                            Capsule()
-                                .fill(LinearGradient(colors: [.teal, .orange, .red],
-                                                     startPoint: .leading, endPoint: .trailing))
-                                .frame(width: max(6, geo.size.width * min(eu.utilization / 100, 1)))
-                        }
-                    }
-                    .frame(height: 6)
-                    HStack {
-                        Text(String(format: "%.1f%% of monthly cap", eu.utilization))
+                }
+                .frame(height: 6)
+                HStack {
+                    Text("\(Int(eu.utilization))% of cap · \(paceLine)")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    if let s = store.oauthUsage?.five_hour, let w = store.oauthUsage?.seven_day {
+                        Text("Session \(Int(s.utilization))% · Week \(Int(w.utilization))%")
                             .font(.system(size: 9.5))
                             .foregroundStyle(.tertiary)
-                        Spacer()
-                        if let s = store.oauthUsage?.five_hour, let w = store.oauthUsage?.seven_day {
-                            Text("Session \(Int(s.utilization))% · Week \(Int(w.utilization))%")
-                                .font(.system(size: 9.5))
-                                .foregroundStyle(.tertiary)
-                        }
                     }
-                } else {
-                    Text("Billing data unavailable — sign in to Claude Code to refresh the token. Showing API-equivalent only.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
                 }
-            }
-            .padding(12)
-        }
-    }
-
-    // Month nav + big number + pace
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
-                    Button { step(-1) } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 9, weight: .bold))
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(store.selectedIndex <= 0)
-                    .opacity(store.selectedIndex <= 0 ? 0.25 : 0.8)
-
-                    Text(store.selected?.label ?? "Claude Usage")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(minWidth: 92)
-
-                    Button { step(1) } label: {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9, weight: .bold))
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(store.selectedIndex >= store.months.count - 1)
-                    .opacity(store.selectedIndex >= store.months.count - 1 ? 0.25 : 0.8)
-                }
-                Text(headlineText)
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
-                    .contentTransition(.numericText())
+            } else {
                 Text(paceLine)
-                    .font(.system(size: 10.5))
+                    .font(.system(size: 9.5))
                     .foregroundStyle(.tertiary)
             }
-            Spacer()
-            Text(pillText)
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Capsule().fill(.quaternary.opacity(0.5)))
-                .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
+
+            // Chart, same card
+            if days.isEmpty {
+                Text(store.isLoading ? "Loading…" : "No usage this month")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 28)
+            } else {
+                chart.padding(.top, 2)
+            }
         }
     }
 
     private var pillText: String {
         if isCurrentMonth {
-            return store.billingStale ? "cached" : "billed"
+            return store.billingStale ? "cached" : "true billing"
         }
         return "API-equivalent"
     }
@@ -570,7 +547,7 @@ struct UsageView: View {
             let daysInMonth = cal.range(of: .day, in: .month, for: Date())?.count ?? 30
             let avg = monthTotal / Double(max(dayOfMonth, 1))
             let pace = avg * Double(daysInMonth)
-            return "avg \(money(avg, decimals: 0))/day · pacing \(money(pace, decimals: 0))"
+            return "\(money(avg, decimals: 0))/day · pacing \(money(pace, decimals: 0))"
         } else {
             let avg = monthTotal / Double(days.count)
             return "avg \(money(avg, decimals: 0))/day · \(days.count) active days"
@@ -617,10 +594,10 @@ struct UsageView: View {
                 }
             }
         }
-        .frame(height: 150)
+        .frame(height: 140)
     }
 
-    // Detail: hovered day, or month totals by model
+    // Per-model breakdown — hovered day, or whole month.
     private var breakdown: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
