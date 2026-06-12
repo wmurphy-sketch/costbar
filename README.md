@@ -30,7 +30,9 @@ The accurate way to get a real *daily* number is to difference the month-to-date
 **Bottom line:**
 - **Month-to-date total** — exact, any time.
 - **Historical per-day / per-model** — estimate only (API-list via ccusage); not your real bill.
-- **Real overage billed today** — exact. CostBar snapshots the `used_credits` counter on every refresh and stores a local daily ledger (`overage-ledger.json`); each day's real overage is that day's value minus the prior day's. Shown as the `✓ Billed today` line in the breakdown. **Accurate from the day you first run the app forward** — it can't backfill the past (Anthropic stores no history), so the first day shows "tracks from tomorrow." Days you stay within your plan allowance correctly show $0 (the month total doesn't move because nothing spilled into billed overage).
+- **Real overage billed today** — exact, and live intraday. CostBar snapshots the `used_credits` counter on every refresh into a local ledger (`overage-ledger.json`, recording each day's opening and latest reading). Today's overage = latest − today's opening reading, so it updates every ~10 min and is available the same day (no waiting for tomorrow). Past days diff against the prior day's close. Shown as `✓ Billed today` in the breakdown. Days you stay within your plan allowance correctly show **$0** — the counter only moves on billed overage. First-day caveat: "today's opening" is the first reading after the app launched, so overage accrued *before* first launch on day one sits in the baseline, not the delta; exact start-to-finish from the next full day.
+
+The breakdown also shows `▪ Used today (est.)` — the ccusage activity estimate, which climbs as you work even within plan. Two questions, side by side: **billed** (exact, often $0) vs **used** (estimate, always moving).
 
 **Why the estimate bars and the real total don't match:** the bars measure *activity* (priced at API rates); the total measures *overage billing* (only usage beyond your plan allowance). On days you stay within plan, you'll see activity on the bars but $0 real overage — both are correct, they answer different questions.
 

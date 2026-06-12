@@ -143,39 +143,43 @@ final class UsageStore: ObservableObject {
 
     // MARK: Real-overage daily ledger (forward-differencing of used_credits)
 
-    /// Per-day high-water mark of used_credits (dollars), keyed by yyyy-MM-dd (local).
-    /// Today's real overage = today's high-water − the prior day's high-water.
-    @Published private(set) var overageEnd: [String: Double] = [:]   // date → end-of-day used_credits
+    struct DayMark: Codable { var open: Double; var end: Double }   // first & latest used_credits seen that day
 
-    /// Real overage billed on a given local day, or nil if we don't yet have both
-    /// that day's and the prior day's snapshots (so we never show a fabricated number).
+    /// Per-day open/end marks of used_credits (dollars), keyed by yyyy-MM-dd (local).
+    @Published private(set) var ledger: [String: DayMark] = [:]
+
+    /// Real overage on a local day. For TODAY: latest − today's own opening reading
+    /// (exact, live, available immediately). For PAST days: end − prior day's end.
     func realOverage(forDayKey key: String) -> Double? {
-        guard let end = overageEnd[key] else { return nil }
-        // Find the most recent prior recorded day.
-        let priorKeys = overageEnd.keys.filter { $0 < key }.sorted()
-        guard let prevKey = priorKeys.last, let prev = overageEnd[prevKey] else {
-            return nil   // first day on record — no baseline to diff against
+        guard let mark = ledger[key] else { return nil }
+        let todayKey = Self.localDayKey(Date())
+        if key == todayKey {
+            // Intraday: spend since today's first reading. Exact and live.
+            let delta = mark.end - mark.open
+            return max(0, delta)
         }
-        let delta = end - prev
-        // Negative delta = monthly reset (counter rolled to ~0). On a reset day the
-        // billed amount is just the new end value (spend since the reset).
-        return delta < 0 ? end : delta
+        // Past day: diff against the most recent prior recorded day's end.
+        let priorKeys = ledger.keys.filter { $0 < key }.sorted()
+        guard let prevKey = priorKeys.last, let prev = ledger[prevKey] else { return nil }
+        let delta = mark.end - prev.end
+        return delta < 0 ? mark.end : delta   // negative = monthly reset → spend since reset
     }
 
     private func recordOverageSnapshot(_ usedDollars: Double) {
         let key = Self.localDayKey(Date())
-        // Keep the high-water mark for the day (used_credits only rises within a month).
-        if let existing = overageEnd[key], existing > usedDollars {
-            // lower than what we already saw today → monthly reset mid-day; start fresh
-            overageEnd[key] = usedDollars
+        if var mark = ledger[key] {
+            // Mid-month reset guard: if the counter dropped below today's open, rebase open.
+            if usedDollars < mark.open { mark.open = usedDollars }
+            mark.end = max(mark.end, usedDollars)
+            ledger[key] = mark
         } else {
-            overageEnd[key] = usedDollars
+            // First reading of a new day sets the opening baseline.
+            ledger[key] = DayMark(open: usedDollars, end: usedDollars)
         }
-        // Prune to ~90 days to keep the file small.
-        if overageEnd.count > 100 {
-            for k in overageEnd.keys.sorted().prefix(overageEnd.count - 90) { overageEnd[k] = nil }
+        if ledger.count > 100 {
+            for k in ledger.keys.sorted().prefix(ledger.count - 90) { ledger[k] = nil }
         }
-        if let data = try? JSONEncoder().encode(overageEnd) {
+        if let data = try? JSONEncoder().encode(ledger) {
             try? data.write(to: Self.ledgerURL)
         }
     }
@@ -197,10 +201,14 @@ final class UsageStore: ObservableObject {
             billingEverLoaded = true
             billingStale = true   // until a live fetch confirms it
         }
-        // Load the overage ledger.
-        if let data = try? Data(contentsOf: Self.ledgerURL),
-           let led = try? JSONDecoder().decode([String: Double].self, from: data) {
-            overageEnd = led
+        // Load the overage ledger. Migrate the old date→Double format (end-only) by
+        // seeding open=end so prior recordings aren't lost.
+        if let data = try? Data(contentsOf: Self.ledgerURL) {
+            if let led = try? JSONDecoder().decode([String: DayMark].self, from: data) {
+                ledger = led
+            } else if let old = try? JSONDecoder().decode([String: Double].self, from: data) {
+                ledger = old.mapValues { DayMark(open: $0, end: $0) }
+            }
         }
     }
 
@@ -786,22 +794,30 @@ struct UsageView: View {
             .frame(height: 120)
             .scrollIndicators(.never)
 
-            // Real overage billed today — the exact, counter-differenced number.
-            // Distinct from the API-list estimate above. Current month + no day hovered.
+            // Today's two numbers, side by side: exact billed overage vs activity estimate.
+            // Current month, no day hovered.
             if isCurrentMonth && selectedDay == nil {
                 Divider().opacity(0.4)
-                HStack(spacing: 5) {
-                    Image(systemName: "checkmark.seal.fill").font(.system(size: 8))
-                    if let real = store.realOverage(forDayKey: UsageStore.localDayKey(Date())) {
-                        Text("Billed today")
-                            .font(.system(size: 10, weight: .medium))
+                VStack(spacing: 4) {
+                    // Real overage — exact, counter-differenced, live intraday
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.seal.fill").font(.system(size: 8))
+                        if let real = store.realOverage(forDayKey: UsageStore.localDayKey(Date())) {
+                            Text("Billed today").font(.system(size: 10, weight: .medium))
+                            Spacer()
+                            Text(money(real)).font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        } else {
+                            Text("Billed today tracks once a baseline is set")
+                                .font(.system(size: 9.5))
+                            Spacer()
+                        }
+                    }
+                    // Activity estimate — ccusage API-list value for today
+                    HStack(spacing: 5) {
+                        Image(systemName: "chart.bar.fill").font(.system(size: 8))
+                        Text("Used today (est.)").font(.system(size: 10))
                         Spacer()
-                        Text(money(real))
-                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-                    } else {
-                        Text("Real daily billing tracks from tomorrow")
-                            .font(.system(size: 9.5))
-                        Spacer()
+                        Text("≈ \(money(todayTotal))").font(.system(size: 10.5, design: .rounded))
                     }
                 }
                 .foregroundStyle(.tertiary)
